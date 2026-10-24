@@ -40,8 +40,12 @@ class OpenAiEngine(override val profile: ModelProfile, http: OkHttpClient) : Llm
         if (profile.provider == "ollama" && !it.endsWith("/v1")) "$it/v1" else it
     }
 
+    /** Up if /v1/models answers, or (older/newer servers) /health on the server root. Any HTTP answer below 500 means it is listening. */
     override suspend fun isReachable(): Boolean = withContext(Dispatchers.IO) {
-        runCatching { quick.newCall(Request.Builder().url("$base/models").build()).execute().use { it.isSuccessful } }.getOrDefault(false)
+        val root = base.removeSuffix("/v1")
+        listOf("$base/models", "$root/health", "$root/").any { url ->
+            runCatching { quick.newCall(Request.Builder().url(url).build()).execute().use { it.code in 200..499 } }.getOrDefault(false)
+        }
     }
 
     override fun notReadyReason(): String = "Can't reach $base. Start the server on the PC and check the address."
