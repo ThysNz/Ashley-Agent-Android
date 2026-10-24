@@ -219,7 +219,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun buildTools(): List<Tool> = buildList {
         val t = agentConfig.tools
-        if (t.files) addAll(FileTools.create(sandbox, memory))
+        if (t.files) {
+            add(nz.thys.ashley.tools.LogTool.create(sandbox) { photoTurn?.first })
+            addAll(FileTools.create(sandbox, memory))
+        }
         if (t.web) addAll(WebTools.create(c.http))
         if (t.memory) addAll(MemoryTools.create(memory, agentConfig.userName))
     }

@@ -18,7 +18,7 @@ works both ways.
 | **Gemma 4 E4B on the phone** (Google LiteRT-LM, GPU) — the default model, with tools | Termux shell, zip import/export, wake word |
 | In-app model download with progress, pause and resume (Gemma 4 E4B 3.7 GB, Qwen3.5-4B 2.7 GB) | |
 | The PC's 30B (llama-server) or Ollama over Wi-Fi / Tailscale | |
-| Agent loop ported from `AgentLoop.cs`; tools: files, web_fetch, web_search, remember, forget, todo | |
+| Agent loop ported from `AgentLoop.cs`; tools: files, **log_note** (say "log this…" → `workspace/notes/log.md`, photo linked), web_fetch, web_search, remember, forget, todo | |
 | Memory files: notes.md, todo.md, sessions/*.jsonl, chats/, backups/, state.json | |
 | Hold-to-talk (Android recogniser, falls back from on-device to standard); spoken replies (Android TTS) | |
 | Settings: Agent, phone protection, Models + downloads, Voice, Tools, Inspect, saved chats, Todo / Notes / Workspace drawer | |

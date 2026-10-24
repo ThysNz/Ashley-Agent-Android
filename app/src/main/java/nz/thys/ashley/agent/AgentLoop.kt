@@ -39,6 +39,8 @@ class AgentLoop(
     companion object {
         const val MAX_OLD_TOOL_RESULT_CHARS = 1500
         const val MAX_CURRENT_TOOL_RESULT_CHARS = 6000
+        /** Tool rounds per message for on-device models (the PC model keeps maxToolRounds from agent.json). */
+        const val LOCAL_MAX_ROUNDS = 10
         private const val REPLY_RESERVE_TOKENS = 1024
     }
 
@@ -75,7 +77,11 @@ class AgentLoop(
         var genTokens = 0
         var genMs = 0L
         try {
-            for (round in 1..config.maxToolRounds) {
+            // Small on-device models tend to wander (list, read, list again...). Give them a tighter budget
+            // and stop exact repeats: a call already made this turn gets its old result plus a nudge to answer.
+            val maxRounds = if (engine.isLocal) minOf(config.maxToolRounds, LOCAL_MAX_ROUNDS) else config.maxToolRounds
+            val doneThisTurn = mutableMapOf<String, String>()
+            for (round in 1..maxRounds) {
                 guard?.invoke()?.let { reason ->
                     repairHistory()
                     val msg = "Stopped to protect the phone: $reason"
@@ -115,13 +121,17 @@ class AgentLoop(
                     coroutineContext.ensureActive()
                     val t0 = System.currentTimeMillis()
                     emit(AgentEvent.ToolStart(call.id, call.name, describe(call), call.argsJson))
-                    val (output, failed) = runTool(call)
+                    val callKey = call.name + " " + call.argsJson.replace(Regex("\\s+"), "")
+                    val (output, failed) = doneThisTurn[callKey]?.let {
+                        "You already called ${call.name} with these arguments in this task; the result was the same:\n$it\n" +
+                            "Don't repeat it. Give your final answer to the user now." to false
+                    } ?: runTool(call).also { (out, _) -> doneThisTurn[callKey] = TextUtil.clipMiddle(out, 600, 200) }
                     val clipped = TextUtil.clipMiddle(output, MAX_CURRENT_TOOL_RESULT_CHARS, MAX_CURRENT_TOOL_RESULT_CHARS)
                     add(Msg("tool", clipped, toolCallId = call.id, toolName = call.name))
                     emit(AgentEvent.ToolEnd(call.id, output, failed, System.currentTimeMillis() - t0))
                 }
             }
-            val msg = "I stopped after ${config.maxToolRounds} tool rounds (maxToolRounds). Say 'continue' to keep going."
+            val msg = "I stopped after $maxRounds tool steps" + (if (engine.isLocal) " (the on-device limit, to spare the phone)" else " (maxToolRounds)") + ". Say 'continue' to keep going."
             add(Msg("assistant", msg))
             emit(AgentEvent.Final(msg, if (voice) Speakable.make(msg) else "", System.currentTimeMillis() - started, null))
             return msg
@@ -192,7 +202,13 @@ class AgentLoop(
 
         parts += "## How to work\n" +
             "- You are an agent: when asked to do something, do it with your tools instead of describing how. Keep going until the task is finished.\n" +
-            "- Look before you change: list or read files first. Never guess a path or file content.\n" +
+            "- Look before you change: list or read files first. Never guess a path or file content. " +
+            "Exception: log_note, todo, remember and forget need no looking first - call them directly.\n" +
+            "- Do the least that answers the request. A simple request (log this, add a todo, a question you can answer) takes " +
+            "at most one tool call, then a one-sentence reply. Never call the same tool twice with the same arguments. " +
+            "Once a tool result shows the job is done, stop and answer.\n" +
+            "- When $user asks you to log, note down, write down or save a comment for later, call log_note once with his words. " +
+            "Don't use todo or remember for that.\n" +
             "- Photos $user takes in the app are saved in the workspace under photos/ (the message names the file), and photos/photo-log.md " +
             "keeps each photo with his comment and your reply. If you can see the photo, describe what matters for his question; if you can't, say so.\n" +
             "- For jobs with three or more steps, write a todo list first and tick items off.\n" +

@@ -132,12 +132,11 @@ class LiteRtEngine(override val profile: ModelProfile, private val paths: Paths)
 
         val canContinue = conversation != null && conversationKey == key &&
             messages.size > sent.size && messages.subList(0, sent.size) == sent
-        val conv: Conversation
-        val reply: Message
+        val reply: Message = try {
         if (canContinue) {
-            conv = conversation!!
+            val conv = conversation!!
             val fresh = messages.drop(sent.size)
-            reply = if (fresh.all { it.role == "tool" }) {
+            if (fresh.all { it.role == "tool" }) {
                 conv.sendMessage(Message.tool(Contents.of(fresh.map { Content.ToolResponse(it.toolName ?: "tool", wrapResult(it.content)) })))
             } else {
                 sendTurn(conv, fresh)
@@ -146,7 +145,7 @@ class LiteRtEngine(override val profile: ModelProfile, private val paths: Paths)
             runCatching { conversation?.close() }
             // Earlier turns go in as history; the current turn (last user message onward) is sent now.
             val lastUser = messages.indexOfLast { it.role == "user" }.coerceAtLeast(0)
-            conv = e.createConversation(
+            val conv = e.createConversation(
                 ConversationConfig(
                     systemInstruction = Contents.of(system),
                     initialMessages = history(messages.take(lastUser)),
@@ -157,13 +156,24 @@ class LiteRtEngine(override val profile: ModelProfile, private val paths: Paths)
             )
             conversation = conv
             conversationKey = key
-            reply = sendTurn(conv, messages.drop(lastUser))
+            sendTurn(conv, messages.drop(lastUser))
+        }
+        } catch (ex: Exception) {
+            // Gemma sometimes writes a slightly malformed tool call (e.g. a value without its name) and LiteRT-LM's
+            // strict parser throws. Recover the calls from the raw text it includes in the error, and start a fresh
+            // conversation next round (the native one may not have kept this turn).
+            val recovered = recoverToolCalls(ex, tools) ?: throw ex
+            runCatching { conversation?.close() }
+            conversation = null
+            sent = emptyList()
+            android.util.Log.w("Ashley", "LiteRT-LM: recovered ${recovered.toolCalls.size} tool call(s) from a parse error")
+            return@withContext recovered.copy(ms = System.currentTimeMillis() - started)
         }
 
         val calls = reply.toolCalls.map { tc ->
             ToolCall("call_" + UUID.randomUUID().toString().take(8), tc.name, argsToJson(tc.arguments))
         }
-        val text = textOf(reply).replace(Regex("<think>.*?</think>", RegexOption.DOT_MATCHES_ALL), "")
+        val text = cleanReply(textOf(reply).replace(Regex("<think>.*?</think>", RegexOption.DOT_MATCHES_ALL), ""))
         // Remember exactly what AgentLoop will add, so the next round only sends what is new.
         sent = messages + if (calls.isEmpty()) Msg("assistant", text.trim().ifEmpty { "(no reply)" }) else Msg("assistant", text, toolCalls = calls)
 
@@ -188,39 +198,86 @@ class LiteRtEngine(override val profile: ModelProfile, private val paths: Paths)
         return conv.sendMessage(asText(msgs))
     }
 
+    // ---- recovering from LiteRT-LM tool-call parse errors ----
+
+    private val gemmaCall = Regex("<\\|tool_call>\\s*call:([A-Za-z0-9_]+)\\{(.*?)\\}\\s*<tool_call\\|>", RegexOption.DOT_MATCHES_ALL)
+
+    /** Pulls Gemma's raw output out of the error and parses the tool calls leniently. Null if there is nothing to recover. */
+    private fun recoverToolCalls(err: Throwable, tools: List<Tool>): LlmResult? {
+        val msg = generateSequence(err) { it.cause }.mapNotNull { it.message }.firstOrNull { "full response:" in it } ?: return null
+        val raw = msg.substringAfter("full response:").substringBefore("error: Failed to parse").trim()
+        val calls = gemmaCall.findAll(raw).mapNotNull { m ->
+            val name = m.groupValues[1]
+            val tool = tools.firstOrNull { it.name == name } ?: return@mapNotNull null
+            ToolCall("call_" + UUID.randomUUID().toString().take(8), name, parseGemmaArgs(m.groupValues[2], tool).toString())
+        }.toList()
+        val text = cleanReply(gemmaCall.replace(raw, "").replace("<|\"|>", "\""))
+        if (calls.isEmpty() && text.isEmpty()) return null
+        return LlmResult(text, calls, completionTokens = (raw.length / 4).coerceAtLeast(1))
+    }
+
+    /**
+     * Gemma's call syntax: key:<|"|>text<|"|>,key:42,key:true. A value written without its key is given to the
+     * next parameter of the tool that hasn't been filled yet (in schema order), which fixes the common slip
+     * todo{action:<|"|>add<|"|><|"|>Buy milk<|"|>}.
+     */
+    private fun parseGemmaArgs(body: String, tool: Tool): JsonObject {
+        val order = (tool.schema["properties"] as? JsonObject)?.keys?.toList() ?: emptyList()
+        val out = linkedMapOf<String, JsonElement>()
+        val token = Regex("(?:([A-Za-z_][A-Za-z0-9_]*)\\s*:\\s*)?(?:<\\|\"\\|>(.*?)<\\|\"\\|>|([^,<]+))", RegexOption.DOT_MATCHES_ALL)
+        for (m in token.findAll(body)) {
+            val quoted = m.groups[2]?.value
+            val bare = m.groups[3]?.value?.trim()
+            if (quoted == null && bare.isNullOrEmpty()) continue
+            val value: JsonElement = when {
+                quoted != null -> JsonPrimitive(quoted)
+                bare == "true" || bare == "false" -> JsonPrimitive(bare.toBoolean())
+                bare!!.toLongOrNull() != null -> JsonPrimitive(bare.toLong())
+                bare.toDoubleOrNull() != null -> JsonPrimitive(bare.toDouble())
+                else -> JsonPrimitive(bare)
+            }
+            val key = m.groups[1]?.value?.takeIf { it in order || order.isEmpty() } ?: order.firstOrNull { it !in out } ?: continue
+            out[key] = value
+        }
+        return JsonObject(out)
+    }
+
     /** The text parts of a reply (a Message holds a list of Content items: text, images, tool calls...). */
     private fun textOf(m: Message): String =
         m.contents.contents.filterIsInstance<Content.Text>().joinToString("") { it.text }
 
-    /** Earlier turns as plain user / model messages (tool rounds folded into the model's text). */
+    /**
+     * Earlier turns as plain user / model messages: only what was said, not the tool traffic. (Writing tool calls
+     * into the model's own turns as text taught Gemma to echo "[I used ...]" lines back in its replies.)
+     */
     private fun history(msgs: List<Msg>): List<Message> {
         val out = mutableListOf<Message>()
-        var pendingModel = StringBuilder()
-        fun flushModel() {
-            if (pendingModel.isNotBlank()) out += Message.model(pendingModel.toString().trim())
-            pendingModel = StringBuilder()
+        for (m in msgs) when {
+            m.role == "user" -> out += Message.user(m.content)
+            m.role == "assistant" && m.toolCalls.isEmpty() && m.content.isNotBlank() -> out += Message.model(m.content)
         }
-        for (m in msgs) when (m.role) {
-            "user" -> { flushModel(); out += Message.user(m.content) }
-            "assistant" -> {
-                if (m.toolCalls.isNotEmpty()) pendingModel.append("[I used ${m.toolCalls.joinToString { it.name + " " + it.argsJson }}]\n")
-                if (m.content.isNotBlank()) pendingModel.append(m.content).append('\n')
-            }
-            "tool" -> pendingModel.append("[${m.toolName} result: ${m.content.take(400)}]\n")
-        }
-        flushModel()
         return out
     }
 
-    /** The current turn as one message: the user's words plus any tool rounds already done this turn. */
-    private fun asText(msgs: List<Msg>): String = msgs.joinToString("\n") { m ->
-        when (m.role) {
-            "user" -> m.content
-            "assistant" -> if (m.toolCalls.isNotEmpty()) "[Earlier in this task you called: ${m.toolCalls.joinToString { it.name + " " + it.argsJson }}]" else m.content
-            "tool" -> "[${m.toolName} result: ${m.content}]"
-            else -> m.content
-        }
+    /**
+     * The current turn as one user message. If tools already ran for it (after a fresh start mid-task), their
+     * results are listed as information from the app, so the model carries on instead of repeating them.
+     */
+    private fun asText(msgs: List<Msg>): String {
+        val ask = msgs.filter { it.role == "user" }.joinToString("\n") { it.content }
+        val done = msgs.filter { it.role == "tool" }
+        if (done.isEmpty()) return ask
+        val results = done.joinToString("\n") { "- ${it.toolName}: ${it.content.lineSequence().firstOrNull { l -> l.isNotBlank() }?.take(200) ?: "done"}" }
+        return "$ask\n\n(Note from the app, not from the user: these steps are already done for this request - don't repeat them.\n$results\n" +
+            "Continue if something is still missing, otherwise reply to the user in one or two sentences.)"
     }
+
+    /** Removes tool traces a model sometimes copies into its reply ("[I used write_file {...}]", "[todo result: ...]"). */
+    private fun cleanReply(text: String): String = text
+        .replace(Regex("\\[I used [a-z_]+.*?\\}\\]", RegexOption.DOT_MATCHES_ALL), "")
+        .replace(Regex("\\[(Earlier in this task you called|[a-z_]+ result):.*?\\]", RegexOption.DOT_MATCHES_ALL), "")
+        .replace(Regex("\\n{3,}"), "\n\n")
+        .trim()
 
     private fun wrapResult(output: String): String = buildJsonObject { put("result", output) }.toString()
 
