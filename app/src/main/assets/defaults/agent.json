@@ -1,0 +1,20 @@
+{
+  // Same keys as F:\AI-Agents\ashley\config\agent.json, plus the phone-only "tools" switches.
+  "name": "Ashley",
+  "persona": "ashley",
+  "defaultModel": "demo",
+  "maxToolRounds": 80,
+  "historyTurns": 12,
+  "commandTimeoutSeconds": 120,
+  "maxNotesChars": 8000,
+  "gitName": "Ashley",
+  "gitEmail": "ashley@ai-agents.local",
+  "tools": {
+    "files": true,
+    "web": true,
+    "memory": true,
+    "skills": true,
+    "termux": false,
+    "git": false
+  }
+}

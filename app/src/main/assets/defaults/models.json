@@ -1,0 +1,50 @@
+{
+  // Same format as F:\AI-Agents\ashley\config\models.json, with phone engines added.
+  //   provider "fake"     = built-in demo engine (no model needed) - for testing the UI and agent loop
+  //   provider "llamacpp" = on-device GGUF (phase 2)    file = path under the app's models folder
+  //   provider "litert"   = on-device .litertlm (phase 5)
+  //   provider "openai"   = any OpenAI-compatible server: llama-server on the PC, or Ollama's /v1
+  //   provider "ollama"   = Ollama, uses its OpenAI-compatible /v1 endpoint
+  "models": [
+    {
+      "name": "demo",
+      "description": "Built-in demo engine - shows the UI and a tool call, no model needed",
+      "provider": "fake",
+      "contextSize": 16384,
+      "supportsTools": true
+    },
+    {
+      "name": "qwen3-4b",
+      "description": "Qwen3 4B Instruct 2507 - default on-device model, good at tools",
+      "provider": "llamacpp",
+      "file": "models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+      "backend": "gpu",
+      "contextSize": 16384,
+      "temperature": 0.3,
+      "maxTokens": 2048,
+      "threads": 6,
+      "supportsTools": true,
+      "think": false
+    },
+    {
+      "name": "gemma4-e2b",
+      "description": "Gemma 4 E2B - fastest for voice chat (LiteRT-LM)",
+      "provider": "litert",
+      "file": "models/gemma-4-E2B-it.litertlm",
+      "backend": "gpu",
+      "contextSize": 8192,
+      "supportsTools": true
+    },
+    {
+      "name": "pc-qwen3-coder-30b",
+      "description": "The 30B on the PC via llama-server - set baseUrl to your PC's Tailscale name",
+      "provider": "openai",
+      "baseUrl": "http://YOUR-PC:8080/v1",
+      "model": "qwen3-coder-30b",
+      "contextSize": 32768,
+      "temperature": 0.3,
+      "maxTokens": 4096,
+      "supportsTools": true
+    }
+  ]
+}

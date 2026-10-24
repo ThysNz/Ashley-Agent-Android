@@ -1,0 +1,19 @@
+{
+  // Phase 1 uses Android's own speech engines; phase 4 switches the default to sherpa-onnx
+  // (Whisper base.en in, Piper en_US-hfc_female-medium out).
+  "stt": {
+    "engine": "android",
+    "language": "en-NZ",
+    "maxSeconds": 30,
+    "corrections": { "guys": "Thys", "Ashleigh": "Ashley" }
+  },
+  "tts": {
+    "engine": "android",
+    "voice": "",
+    "speed": 1.0,
+    "pitch": 1.0
+  },
+  "talkMode": "hold",
+  "autoSend": true,
+  "speakReplies": true
+}
