@@ -43,22 +43,28 @@ fun applyCorrections(text: String, corrections: Map<String, String>): String =
 
 class AndroidStt(private val context: Context) : SttEngine {
     private var recognizer: SpeechRecognizer? = null
-    private var listener: SttEngine.Listener? = null
     private var delivered = false
+    private var stopRequested = false
 
-    private fun create(): SpeechRecognizer =
-        if (SpeechRecognizer.isOnDeviceRecognitionAvailable(context)) SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
-        else SpeechRecognizer.createSpeechRecognizer(context)
+    /** Samsung phones often have no working on-device recogniser for every language (error 11/12/13). After one failure we use the standard one. */
+    private var onDeviceFailed = false
+
+    private fun useOnDevice() = !onDeviceFailed && SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
 
     override fun start(language: String, listener: SttEngine.Listener) {
         if (!SpeechRecognizer.isRecognitionAvailable(context) && !SpeechRecognizer.isOnDeviceRecognitionAvailable(context)) {
-            listener.onError("No speech recogniser on this phone. Phase 4 adds Whisper.")
+            listener.onError("No speech recogniser on this phone. Install or enable Google speech services, or wait for Whisper in phase 4.")
             return
         }
-        cancel()
-        this.listener = listener
+        stopRequested = false
+        begin(language, listener)
+    }
+
+    private fun begin(language: String, listener: SttEngine.Listener) {
+        destroyRecognizer()
         delivered = false
-        val r = create()
+        val onDevice = useOnDevice()
+        val r = if (onDevice) SpeechRecognizer.createOnDeviceSpeechRecognizer(context) else SpeechRecognizer.createSpeechRecognizer(context)
         recognizer = r
         r.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {}
@@ -70,12 +76,22 @@ class AndroidStt(private val context: Context) : SttEngine {
             override fun onEndOfSpeech() {}
             override fun onError(error: Int) {
                 if (delivered) return
+                val onDeviceProblem = error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED ||
+                    error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
+                    error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ||
+                    error == SpeechRecognizer.ERROR_CANNOT_CHECK_SUPPORT
+                if (onDevice && onDeviceProblem) {
+                    // Fall back to the phone's standard recogniser and carry on.
+                    onDeviceFailed = true
+                    if (!stopRequested) { begin(language, listener); return }
+                    delivered = true
+                    listener.onError("Switched to the phone's standard speech recogniser. Hold the mic and try again.")
+                    return
+                }
                 delivered = true
                 when (error) {
-                    SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> listener.onResult("")
-                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> listener.onError("Microphone permission is off.")
-                    SpeechRecognizer.ERROR_CLIENT -> listener.onResult("")
-                    else -> listener.onError("Speech recognition error $error.")
+                    SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT, SpeechRecognizer.ERROR_CLIENT -> listener.onResult("")
+                    else -> listener.onError(describe(error))
                 }
             }
             override fun onResults(results: Bundle?) {
@@ -92,7 +108,7 @@ class AndroidStt(private val context: Context) : SttEngine {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, onDevice)
             // Hold-to-talk: don't end on a short pause while the button is still held.
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 4000L)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 4000L)
@@ -100,12 +116,29 @@ class AndroidStt(private val context: Context) : SttEngine {
         r.startListening(intent)
     }
 
+    private fun describe(error: Int): String = when (error) {
+        SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Speech recognition needs the network for this language. Check Wi-Fi or mobile data."
+        SpeechRecognizer.ERROR_AUDIO -> "Couldn't record audio. Is another app using the microphone?"
+        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission is off."
+        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "The speech recogniser is busy. Try again in a moment."
+        SpeechRecognizer.ERROR_TOO_MANY_REQUESTS -> "Too many speech requests. Wait a few seconds."
+        SpeechRecognizer.ERROR_SERVER, SpeechRecognizer.ERROR_SERVER_DISCONNECTED -> "The speech service stopped (error $error). Try again; if it keeps happening, update Speech Recognition and Synthesis from Google in the Play Store."
+        SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED, SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> "This language isn't available for speech recognition. Try en-US or en-GB in Settings, Voice."
+        else -> "Speech recognition error $error."
+    }
+
     override fun stop() {
+        stopRequested = true
         recognizer?.stopListening()
     }
 
     override fun cancel() {
-        recognizer?.let { it.cancel(); it.destroy() }
+        stopRequested = true
+        destroyRecognizer()
+    }
+
+    private fun destroyRecognizer() {
+        recognizer?.let { runCatching { it.cancel(); it.destroy() } }
         recognizer = null
     }
 

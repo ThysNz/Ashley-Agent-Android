@@ -53,7 +53,7 @@ private fun Prose(chunk: String) {
         val isList = lines.all { it.trimStart().matches(Regex("^([-*+]|\\d+[.)])\\s+.*")) }
         when {
             lines.size == 1 && b.trimStart().startsWith("#") ->
-                Text(inline(b.trimStart().trimStart('#').trim()), fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = c.text, modifier = Modifier.padding(top = 8.dp, bottom = 2.dp))
+                Text(inlineMd(b.trimStart().trimStart('#').trim()), fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = c.text, modifier = Modifier.padding(top = 8.dp, bottom = 2.dp))
             isList -> Column(Modifier.padding(vertical = 4.dp)) {
                 lines.forEach { l ->
                     val ordered = Regex("^\\s*(\\d+)[.)]\\s+").find(l)
@@ -61,11 +61,11 @@ private fun Prose(chunk: String) {
                     val body = l.trimStart().replaceFirst(Regex("^([-*+]|\\d+[.)])\\s+"), "")
                     Row(Modifier.padding(vertical = 1.dp)) {
                         Text(bullet, color = c.muted, fontSize = 14.sp, modifier = Modifier.padding(end = 8.dp))
-                        Text(inline(body), color = c.text, fontSize = 14.sp, lineHeight = 21.sp)
+                        Text(inlineMd(body), color = c.text, fontSize = 14.sp, lineHeight = 21.sp)
                     }
                 }
             }
-            else -> Text(inline(b), color = c.text, fontSize = 14.sp, lineHeight = 21.sp, modifier = Modifier.padding(vertical = 3.dp))
+            else -> Text(inlineMd(b), color = c.text, fontSize = 14.sp, lineHeight = 21.sp, modifier = Modifier.padding(vertical = 3.dp))
         }
     }
 }
@@ -87,7 +87,7 @@ private fun CodeBlock(code: String) {
 
 /** `code` and **bold** inside a line. */
 @Composable
-private fun inline(s: String): AnnotatedString {
+private fun inlineMd(s: String): AnnotatedString {
     val c = Ashley.colors
     val token = Regex("`([^`]+)`|\\*\\*([^*]+)\\*\\*")
     return buildAnnotatedString {
