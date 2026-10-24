@@ -17,7 +17,7 @@ import java.time.format.DateTimeFormatter
  * Long-term memory and the session log - a port of Memory.cs. Plain text in the memory folder:
  *   notes.md          what the agent knows (read into every prompt)
  *   todo.md           the agent's task list
- *   sessions/*.jsonl  every message, written as it happens
+ *   sessions/<date>.jsonl  every message, written as it happens
  *   chats/            current.json + saved chats
  *   backups/          copies of files before they were overwritten or deleted
  */

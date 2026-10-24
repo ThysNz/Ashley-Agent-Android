@@ -137,7 +137,7 @@ class AndroidTts(context: Context) : TtsEngine {
 
     override fun voices(): List<String> = if (!ready) emptyList() else runCatching {
         tts.voices.orEmpty()
-            .filter { it.locale.language == "en" && !it.isNetworkConnectionRequired && Voice.FEATURE_NOT_INSTALLED !in it.features }
+            .filter { it.locale.language == "en" && !it.isNetworkConnectionRequired && TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED !in it.features }
             .map { it.name }.sorted()
     }.getOrDefault(emptyList())
 
