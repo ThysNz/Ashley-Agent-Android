@@ -204,7 +204,7 @@ fun TextDialog(title: String, initial: String, number: Boolean = false, singleLi
             OutlinedTextField(
                 value = text, onValueChange = { text = it }, singleLine = singleLine,
                 minLines = if (singleLine) 1 else 6,
-                keyboardOptions = KeyboardOptions(keyboardType = if (number) KeyboardType.Number else KeyboardType.Text),
+                keyboardOptions = KeyboardOptions(keyboardType = if (number) KeyboardType.Decimal else KeyboardType.Text),
                 modifier = Modifier.fillMaxWidth(),
             )
         },

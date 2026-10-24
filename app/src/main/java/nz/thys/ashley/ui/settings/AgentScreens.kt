@@ -78,6 +78,23 @@ fun SettingsAgentScreen(vm: ChatViewModel, back: () -> Unit) {
             }
         }
         Column {
+            SectionLabel("Phone protection (on-device models)")
+            Group {
+                EditRow("Stop above (°C)", String.format("%.0f", a.maxPhoneTempC), sub = "Battery temperature; won't start, and stops between steps", number = true) { v ->
+                    v.toFloatOrNull()?.let { vm.updateAgent(a.copy(maxPhoneTempC = it.coerceIn(30f, 50f))) }
+                }
+                RowDivider()
+                ValueRow("Stop at thermal level", listOf("", "", "Moderate", "Severe", "Critical").getOrElse(a.stopThermalStatus) { "Severe" }, sub = "Android's own heat warning", onClick = {
+                    val next = when (a.stopThermalStatus) { 2 -> 3; 3 -> 4; else -> 2 }
+                    vm.updateAgent(a.copy(stopThermalStatus = next))
+                })
+                RowDivider()
+                EditRow("Keep free RAM (GB)", String.format("%.1f", a.reserveRamGb), sub = "A model won't load if less would be left", number = true) { v ->
+                    v.toFloatOrNull()?.let { vm.updateAgent(a.copy(reserveRamGb = it.coerceIn(0.3f, 4f))) }
+                }
+            }
+        }
+        Column {
             SectionLabel("Tools")
             Group {
                 SwitchRow("File tools", "Workspace folder only · backups on", a.tools.files) { vm.updateAgent(a.copy(tools = a.tools.copy(files = it))) }

@@ -1,41 +1,222 @@
 package nz.thys.ashley.llm
 
+import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Content
+import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.Conversation
+import com.google.ai.edge.litertlm.ConversationConfig
+import com.google.ai.edge.litertlm.Engine
+import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.Message
+import com.google.ai.edge.litertlm.OpenApiTool
+import com.google.ai.edge.litertlm.SamplerConfig
+import com.google.ai.edge.litertlm.tool
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import nz.thys.ashley.config.ModelProfile
 import nz.thys.ashley.config.Paths
 import nz.thys.ashley.core.Msg
+import nz.thys.ashley.core.ToolCall
 import nz.thys.ashley.tools.Tool
 import java.io.File
+import java.util.UUID
+
+/** Finds the model file: the path in models.json, or (if that's missing) the only file of that type in the models folder. */
+internal fun resolveModelFile(profile: ModelProfile, paths: Paths): File? {
+    val named = profile.file?.let { File(paths.root, it) }
+    if (named != null && named.isFile) return named
+    val ext = named?.extension ?: return null
+    val candidates = paths.models.listFiles { f -> f.isFile && f.extension.equals(ext, ignoreCase = true) }.orEmpty()
+    return candidates.singleOrNull()
+}
 
 /**
- * On-device GGUF models through llama.cpp (JNI, Adreno OpenCL backend). PHASE 2.
+ * On-device GGUF models through llama.cpp (JNI) - for Qwen3.5-4B, the "think harder" model. NEXT STEP.
  *
  * Plan:
- *  - add llama.cpp as a git submodule under app/src/main/cpp and build it with CMake
- *    (GGML_OPENCL=ON for the Adreno GPU; Hexagon stays off - experimental)
- *  - a thin JNI bridge: load(path, nCtx, nGpuLayers, nThreads), applyChatTemplate(messagesJson, toolsJson),
- *    generate(prompt, grammar, onToken), free()
- *  - tool calls: chat template with tools + GBNF grammar so a 4B model can't emit broken JSON,
- *    then ToolCallParser.extract on the output
+ *  - llama.cpp as a git submodule under app/src/main/cpp, built with CMake for arm64-v8a, CPU backend
+ *    (Qwen3.5's Gated-DeltaNet layers aren't GPU-accelerated on Adreno yet)
+ *  - a thin JNI bridge: load(path, nCtx, nThreads), applyChatTemplate(messagesJson, toolsJson, enableThinking),
+ *    generate(prompt, onToken) with a cancel flag, free()
+ *  - tool calls parsed with ToolCallParser (Qwen writes <tool_call>{...}</tool_call>)
  */
 class LlamaCppEngine(override val profile: ModelProfile, private val paths: Paths) : LlmEngine {
-    private val file: File? = profile.file?.let { File(paths.root, it) }
+    override val isLocal: Boolean get() = true
+    override val isLoaded: Boolean get() = false
+    override fun modelBytes(): Long = resolveModelFile(profile, paths)?.length() ?: 0
 
     override suspend fun isReachable(): Boolean = false
 
     override fun notReadyReason(): String =
-        if (file?.exists() == true) "llama.cpp engine arrives in phase 2. The model file is in place."
-        else "Model file missing: ${profile.file}. Copy it into the app's models folder. The llama.cpp engine arrives in phase 2."
+        if (resolveModelFile(profile, paths) != null) "The model file is in place; the llama.cpp engine for Qwen is the next build step."
+        else "Model file missing: ${profile.file}. Download it in Settings, Models. The llama.cpp engine for Qwen is the next build step."
 
     override suspend fun chat(system: String, messages: List<Msg>, tools: List<Tool>): LlmResult =
-        throw IllegalStateException("On-device llama.cpp isn't built yet (phase 2). Pick 'demo' or a PC model in the Model picker.")
+        throw IllegalStateException("On-device Qwen (llama.cpp) isn't built in yet. Use Gemma 4 or the PC model for now.")
 }
 
-/** Gemma 4 / Gemma 3n through Google's LiteRT-LM Kotlin API (GPU or NPU). PHASE 5. */
+/**
+ * Gemma 4 (E4B / E2B) on the phone through Google's LiteRT-LM, GPU by default.
+ *
+ * LiteRT-LM keeps the conversation inside the engine, while AgentLoop sends the whole history every round.
+ * So the engine remembers what it has already been given and only sends what is new (the user message,
+ * or the tool results). If the history no longer matches (new chat, trimmed history, persona change) it
+ * starts a fresh conversation and passes the earlier turns in as plain text.
+ * Tool calls are handled by AgentLoop (automaticToolCalling = false), exactly like the other engines.
+ */
 class LiteRtEngine(override val profile: ModelProfile, private val paths: Paths) : LlmEngine {
-    override suspend fun isReachable(): Boolean = false
 
-    override fun notReadyReason(): String = "LiteRT-LM engine arrives in phase 5."
+    private var engine: Engine? = null
+    private var conversation: Conversation? = null
+    private var conversationKey: String? = null
+    private var sent: List<Msg> = emptyList()
 
-    override suspend fun chat(system: String, messages: List<Msg>, tools: List<Tool>): LlmResult =
-        throw IllegalStateException("LiteRT-LM isn't added yet (phase 5). Pick 'demo' or a PC model in the Model picker.")
+    override val isLocal: Boolean get() = true
+    override val isLoaded: Boolean get() = engine != null
+    override fun modelBytes(): Long = resolveModelFile(profile, paths)?.length() ?: 0
+
+    override suspend fun isReachable(): Boolean = resolveModelFile(profile, paths) != null
+
+    override fun notReadyReason(): String =
+        "Model file missing: ${profile.file}. Download it in Settings, Models, or copy it into the app's models folder."
+
+    private suspend fun ensureEngine(): Engine {
+        engine?.let { return it }
+        val file = resolveModelFile(profile, paths) ?: throw IllegalStateException(notReadyReason())
+        val cache = File(paths.root, "cache").apply { mkdirs() }
+        val config = EngineConfig(
+            modelPath = file.absolutePath,
+            // NPU needs the app's native library folder; GPU is the tested path on the S26.
+            backend = if (profile.backend == "cpu") Backend.CPU() else Backend.GPU(),
+            cacheDir = cache.path,
+            // Context window (prompt + reply). Gemma 4 E4B supports up to 32k; contextSize in models.json.
+            maxNumTokens = profile.contextSize,
+        )
+        val e = Engine(config)
+        e.initialize() // up to ~10 s the first time
+        engine = e
+        return e
+    }
+
+    override suspend fun chat(system: String, messages: List<Msg>, tools: List<Tool>): LlmResult = withContext(Dispatchers.IO) {
+        val started = System.currentTimeMillis()
+        val e = ensureEngine()
+        val key = system.hashCode().toString() + "|" + tools.joinToString(",") { it.name }
+
+        val canContinue = conversation != null && conversationKey == key &&
+            messages.size > sent.size && messages.subList(0, sent.size) == sent
+        val conv: Conversation
+        val reply: Message
+        if (canContinue) {
+            conv = conversation!!
+            val fresh = messages.drop(sent.size)
+            reply = if (fresh.all { it.role == "tool" }) {
+                conv.sendMessage(Message.tool(Contents.of(fresh.map { Content.ToolResponse(it.toolName ?: "tool", wrapResult(it.content)) })))
+            } else {
+                conv.sendMessage(asText(fresh))
+            }
+        } else {
+            runCatching { conversation?.close() }
+            // Earlier turns go in as history; the current turn (last user message onward) is sent now.
+            val lastUser = messages.indexOfLast { it.role == "user" }.coerceAtLeast(0)
+            conv = e.createConversation(
+                ConversationConfig(
+                    systemInstruction = Contents.of(system),
+                    initialMessages = history(messages.take(lastUser)),
+                    samplerConfig = SamplerConfig(topK = 64, topP = 0.95, temperature = profile.temperature),
+                    tools = tools.map { tool(ToolAdapter(it)) },
+                    automaticToolCalling = false,
+                ),
+            )
+            conversation = conv
+            conversationKey = key
+            reply = conv.sendMessage(asText(messages.drop(lastUser)))
+        }
+
+        val calls = reply.toolCalls.map { tc ->
+            ToolCall("call_" + UUID.randomUUID().toString().take(8), tc.name, argsToJson(tc.arguments))
+        }
+        val text = (reply.text ?: "").replace(Regex("<think>.*?</think>", RegexOption.DOT_MATCHES_ALL), "")
+        // Remember exactly what AgentLoop will add, so the next round only sends what is new.
+        sent = messages + if (calls.isEmpty()) Msg("assistant", text.trim().ifEmpty { "(no reply)" }) else Msg("assistant", text, toolCalls = calls)
+
+        val ms = System.currentTimeMillis() - started
+        LlmResult(text, calls, promptTokens = null, completionTokens = (text.length / 4).coerceAtLeast(1), ms = ms)
+    }
+
+    /** Earlier turns as plain user / model messages (tool rounds folded into the model's text). */
+    private fun history(msgs: List<Msg>): List<Message> {
+        val out = mutableListOf<Message>()
+        var pendingModel = StringBuilder()
+        fun flushModel() {
+            if (pendingModel.isNotBlank()) out += Message.model(pendingModel.toString().trim())
+            pendingModel = StringBuilder()
+        }
+        for (m in msgs) when (m.role) {
+            "user" -> { flushModel(); out += Message.user(m.content) }
+            "assistant" -> {
+                if (m.toolCalls.isNotEmpty()) pendingModel.append("[I used ${m.toolCalls.joinToString { it.name + " " + it.argsJson }}]\n")
+                if (m.content.isNotBlank()) pendingModel.append(m.content).append('\n')
+            }
+            "tool" -> pendingModel.append("[${m.toolName} result: ${m.content.take(400)}]\n")
+        }
+        flushModel()
+        return out
+    }
+
+    /** The current turn as one message: the user's words plus any tool rounds already done this turn. */
+    private fun asText(msgs: List<Msg>): String = msgs.joinToString("\n") { m ->
+        when (m.role) {
+            "user" -> m.content
+            "assistant" -> if (m.toolCalls.isNotEmpty()) "[Earlier in this task you called: ${m.toolCalls.joinToString { it.name + " " + it.argsJson }}]" else m.content
+            "tool" -> "[${m.toolName} result: ${m.content}]"
+            else -> m.content
+        }
+    }
+
+    private fun wrapResult(output: String): String = buildJsonObject { put("result", output) }.toString()
+
+    private fun argsToJson(args: Any?): String = when (args) {
+        null -> "{}"
+        is String -> args.ifBlank { "{}" }
+        is Map<*, *> -> toJson(args).toString()
+        else -> args.toString()
+    }
+
+    private fun toJson(v: Any?): JsonElement = when (v) {
+        null -> JsonNull
+        is String -> JsonPrimitive(v)
+        is Number -> JsonPrimitive(v)
+        is Boolean -> JsonPrimitive(v)
+        is Map<*, *> -> JsonObject(v.entries.associate { (k, value) -> k.toString() to toJson(value) })
+        is Iterable<*> -> JsonArray(v.map { toJson(it) })
+        is Array<*> -> JsonArray(v.map { toJson(it) })
+        else -> JsonPrimitive(v.toString())
+    }
+
+    override fun close() {
+        runCatching { conversation?.close() }
+        runCatching { engine?.close() }
+        conversation = null
+        engine = null
+        sent = emptyList()
+    }
+
+    /** Describes one of our tools to LiteRT-LM in OpenAPI form. It is never executed by LiteRT: AgentLoop runs it. */
+    private class ToolAdapter(private val t: Tool) : OpenApiTool {
+        override fun getToolDescriptionJsonString(): String = buildJsonObject {
+            put("name", t.name)
+            put("description", t.description)
+            put("parameters", t.schema)
+        }.toString()
+
+        override fun execute(paramsJsonString: String): String = """{"error":"handled by the app"}"""
+    }
 }

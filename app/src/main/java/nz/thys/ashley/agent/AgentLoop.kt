@@ -48,6 +48,9 @@ class AgentLoop(
     var lastPromptTokens: Int? = null
         private set
 
+    /** Checked before every model call; a non-null answer stops the task (phone too hot, low memory...). */
+    var guard: (() -> String?)? = null
+
     val historyView: List<Msg> get() = history.toList()
 
     fun reset() {
@@ -73,6 +76,13 @@ class AgentLoop(
         var genMs = 0L
         try {
             for (round in 1..config.maxToolRounds) {
+                guard?.invoke()?.let { reason ->
+                    repairHistory()
+                    val msg = "Stopped to protect the phone: $reason"
+                    add(Msg("assistant", msg))
+                    emit(AgentEvent.Error(msg))
+                    return msg
+                }
                 emit(AgentEvent.Thinking(round))
                 val system = buildSystemPrompt(voice)
                 val active = if (engine.profile.supportsTools) tools else emptyList()

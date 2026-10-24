@@ -24,7 +24,7 @@ data class AgentConfig(
     val name: String = "Ashley",
     val userName: String = "Thys",
     val persona: String = "ashley",
-    val defaultModel: String = "demo",
+    val defaultModel: String = "gemma4-e4b",
     val maxToolRounds: Int = 80,
     val historyTurns: Int = 12,
     val commandTimeoutSeconds: Int = 120,
@@ -32,6 +32,12 @@ data class AgentConfig(
     val gitName: String = "Ashley",
     val gitEmail: String = "ashley@ai-agents.local",
     val tools: ToolSwitches = ToolSwitches(),
+    /** Phone comes first: on-device models won't start (and stop between steps) above this battery temperature. */
+    val maxPhoneTempC: Float = 42f,
+    /** ...or at this Android thermal level: 2 = moderate, 3 = severe, 4 = critical. */
+    val stopThermalStatus: Int = 3,
+    /** Free RAM (GB) that must remain after a model is loaded. */
+    val reserveRamGb: Float = 0.8f,
 )
 
 @Serializable

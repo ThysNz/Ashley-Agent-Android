@@ -94,6 +94,7 @@ fun ChatScreen(vm: ChatViewModel, openSettings: () -> Unit, openModels: () -> Un
         Column(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
             TopBar(vm, onChats = { showChats = true }, onPanel = { showPanel = true }, onSettings = openSettings, onPicker = { pickerTab = it })
             ContextMeter(vm.context)
+            PhoneStrip(vm)
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 ChatLog(vm)
                 if (vm.recording) ListeningCard(vm, Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp))
@@ -201,6 +202,38 @@ private fun ContextMeter(ctx: ContextInfo?) {
                 }
             }
         }
+    }
+    Box(Modifier.fillMaxWidth().height(1.dp).background(c.border))
+}
+
+// ---- phone strip: temperature, thermal state, RAM, battery ----
+
+@Composable
+private fun PhoneStrip(vm: ChatViewModel) {
+    val c = Ashley.colors
+    val h = vm.health ?: return
+    val limits = vm.limits()
+    val hot = nz.thys.ashley.device.PhoneMonitor.tooHot(h, limits) != null
+    val warm = !hot && ((h.batteryTempC ?: 0f) >= limits.maxTempC - 4f || h.thermalStatus >= android.os.PowerManager.THERMAL_STATUS_MODERATE)
+    val tempColor = when { hot -> c.danger; warm -> c.warn; else -> c.muted }
+    val ramColor = if (h.lowMemory) c.danger else c.muted
+    Row(
+        Modifier.fillMaxWidth().background(c.surface2).padding(start = 16.dp, end = 16.dp, bottom = 8.dp)
+            .semantics { contentDescription = "Phone status" },
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            (h.batteryTempC?.let { String.format("%.1f °C", it) } ?: "-- °C") + " · " + h.thermalLabel,
+            fontSize = 11.5.sp, color = tempColor, fontWeight = if (hot || warm) FontWeight.SemiBold else FontWeight.Normal,
+        )
+        Text(
+            String.format("RAM %.1f / %.1f GB free", h.availRamBytes / 1e9, h.totalRamBytes / 1e9),
+            fontSize = 11.5.sp, color = ramColor,
+        )
+        Text(String.format("App %.1f GB", h.appRamBytes / 1e9), fontSize = 11.5.sp, color = c.muted)
+        Spacer(Modifier.weight(1f))
+        h.batteryPct?.let { Text("$it%" + if (h.charging) " charging" else "", fontSize = 11.5.sp, color = c.muted) }
     }
     Box(Modifier.fillMaxWidth().height(1.dp).background(c.border))
 }

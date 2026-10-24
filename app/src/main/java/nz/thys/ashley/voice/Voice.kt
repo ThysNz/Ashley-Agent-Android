@@ -3,6 +3,8 @@ package nz.thys.ashley.voice
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -45,6 +47,15 @@ class AndroidStt(private val context: Context) : SttEngine {
     private var recognizer: SpeechRecognizer? = null
     private var delivered = false
     private var stopRequested = false
+    private val main = Handler(Looper.getMainLooper())
+
+    /**
+     * Every recording gets its own number. Callbacks from an older recogniser (Android fires a late
+     * ERROR_CLIENT when the previous one is cancelled) are ignored - otherwise every second press
+     * was answered by the previous session's leftover error.
+     */
+    private var session = 0
+    private var busyRetries = 0
 
     /** Samsung phones often have no working on-device recogniser for every language (error 11/12/13). After one failure we use the standard one. */
     private var onDeviceFailed = false
@@ -57,12 +68,15 @@ class AndroidStt(private val context: Context) : SttEngine {
             return
         }
         stopRequested = false
+        busyRetries = 0
         begin(language, listener)
     }
 
     private fun begin(language: String, listener: SttEngine.Listener) {
         destroyRecognizer()
         delivered = false
+        val mySession = ++session
+        fun current() = mySession == session && !delivered
         val onDevice = useOnDevice()
         val r = if (onDevice) SpeechRecognizer.createOnDeviceSpeechRecognizer(context) else SpeechRecognizer.createSpeechRecognizer(context)
         recognizer = r
@@ -70,12 +84,19 @@ class AndroidStt(private val context: Context) : SttEngine {
             override fun onReadyForSpeech(params: Bundle?) {}
             override fun onBeginningOfSpeech() {}
             override fun onRmsChanged(rmsdB: Float) {
-                listener.onLevel(((rmsdB + 2f) / 12f).coerceIn(0f, 1f))
+                if (mySession == session) listener.onLevel(((rmsdB + 2f) / 12f).coerceIn(0f, 1f))
             }
             override fun onBufferReceived(buffer: ByteArray?) {}
             override fun onEndOfSpeech() {}
             override fun onError(error: Int) {
-                if (delivered) return
+                if (!current()) return
+                // The previous recogniser may still be shutting down: wait a moment and try once more.
+                if ((error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY || error == SpeechRecognizer.ERROR_CLIENT) && !stopRequested && busyRetries < 2) {
+                    busyRetries++
+                    destroyRecognizer()
+                    main.postDelayed({ if (mySession == session && !stopRequested) begin(language, listener) }, 300)
+                    return
+                }
                 val onDeviceProblem = error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED ||
                     error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
                     error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ||
@@ -89,17 +110,20 @@ class AndroidStt(private val context: Context) : SttEngine {
                     return
                 }
                 delivered = true
+                finishLater(mySession)
                 when (error) {
                     SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT, SpeechRecognizer.ERROR_CLIENT -> listener.onResult("")
                     else -> listener.onError(describe(error))
                 }
             }
             override fun onResults(results: Bundle?) {
-                if (delivered) return
+                if (!current()) return
                 delivered = true
+                finishLater(mySession)
                 listener.onResult(results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: "")
             }
             override fun onPartialResults(partialResults: Bundle?) {
+                if (mySession != session) return
                 partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let(listener::onPartial)
             }
             override fun onEvent(eventType: Int, params: Bundle?) {}
@@ -134,7 +158,13 @@ class AndroidStt(private val context: Context) : SttEngine {
 
     override fun cancel() {
         stopRequested = true
+        session++
         destroyRecognizer()
+    }
+
+    /** Release the recogniser once a session has delivered, so the next press starts clean. */
+    private fun finishLater(mySession: Int) {
+        main.post { if (mySession == session) destroyRecognizer() }
     }
 
     private fun destroyRecognizer() {

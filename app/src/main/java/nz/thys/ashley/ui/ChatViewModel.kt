@@ -23,7 +23,13 @@ import nz.thys.ashley.core.AgentEvent
 import nz.thys.ashley.core.ContextInfo
 import nz.thys.ashley.core.InspectInfo
 import nz.thys.ashley.core.Msg
+import nz.thys.ashley.device.PhoneHealth
+import nz.thys.ashley.device.PhoneLimits
+import nz.thys.ashley.device.PhoneMonitor
+import nz.thys.ashley.llm.CatalogModel
 import nz.thys.ashley.llm.Engines
+import nz.thys.ashley.llm.ModelCatalog
+import nz.thys.ashley.llm.ModelDownloader
 import nz.thys.ashley.memory.MemoryStore
 import nz.thys.ashley.tools.FileTools
 import nz.thys.ashley.tools.MemoryTools
@@ -85,6 +91,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private var appState = store.loadState()
 
     val memory = MemoryStore(paths, agentConfig.maxNotesChars)
+    private val monitor = PhoneMonitor(app)
+    private val downloader = ModelDownloader(c.http, paths)
+
+    // ---- phone health (strip under the context meter) ----
+    var health by mutableStateOf<PhoneHealth?>(null)
+        private set
+
+    // ---- model downloads: name -> progress 0..1 ----
+    val downloads = mutableStateMapOf<String, Float>()
+    private val downloadJobs = mutableMapOf<String, Job>()
     private val sandbox = Sandbox(paths.workspace)
     private val stt: SttEngine = AndroidStt(app)
     private val tts: TtsEngine = AndroidTts(app)
@@ -147,6 +163,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val modelsPath: String get() = paths.models.absolutePath
 
     init {
+        // Add Gemma 4 / Qwen3.5 to an older models.json without touching the user's own entries.
+        val merged = ModelCatalog.merge(models)
+        if (merged.size != models.size) { models = merged; store.saveModels(ModelsFile(merged)) }
         val profile = profileFor(appState.model ?: agentConfig.defaultModel)
         personas = store.personaNames()
         personaName = appState.persona?.takeIf { it in personas } ?: agentConfig.persona
@@ -156,6 +175,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             personaName, store.personaText(personaName),
         )
         modelName = profile.name
+        loop.guard = { if (loop.engine.isLocal) PhoneMonitor.tooHot(monitor.read(), limits()) else null }
         loop.load(memory.loadCurrent())
         rebuildItems(loop.historyView)
         refreshPanels()
@@ -167,7 +187,28 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             while (!tts.ready && tries++ < 20) delay(250)
             voices = tts.voices()
         }
+        viewModelScope.launch {
+            // Phone strip: every 3 s (every 2 s while a model is working). While an on-device model works,
+            // stop it if the phone gets too hot - the phone comes first.
+            while (true) {
+                val h = runCatching { monitor.read() }.getOrNull()
+                health = h
+                if (h != null && busy && loop.engine.isLocal) {
+                    PhoneMonitor.tooHot(h, limits())?.let { reason ->
+                        stop()
+                        showToast("Stopped: $reason")
+                    }
+                }
+                delay(if (busy) 2000 else 3000)
+            }
+        }
     }
+
+    fun limits() = PhoneLimits(
+        maxTempC = agentConfig.maxPhoneTempC,
+        stopThermalStatus = agentConfig.stopThermalStatus,
+        reserveRamBytes = (agentConfig.reserveRamGb * 1e9).toLong(),
+    )
 
     private fun profileFor(name: String): ModelProfile =
         models.firstOrNull { it.name == name } ?: models.firstOrNull() ?: ModelProfile("demo", provider = "fake")
@@ -189,7 +230,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         stopSpeaking()
         items += ChatItem.User(key(), text, spoken)
         val aKey = key()
-        items += ChatItem.Assistant(aKey, status = "Thinking...")
+        // Phone comes first: an on-device model doesn't start when the phone is hot or short of memory.
+        val engine = loop.engine
+        if (engine.isLocal) {
+            val h = monitor.read()
+            health = h
+            val refusal = PhoneMonitor.tooHot(h, limits())
+                ?: if (!engine.isLoaded) PhoneMonitor.notEnoughRam(h, engine.modelBytes(), limits()) else null
+            if (refusal != null) {
+                items += ChatItem.Assistant(aKey, error = "Not started: $refusal")
+                return
+            }
+        }
+        items += ChatItem.Assistant(aKey, status = if (engine.isLocal && !engine.isLoaded) "Loading ${engine.profile.name} (first time takes a few seconds)..." else "Thinking...")
         busy = true
         job = viewModelScope.launch {
             try {
@@ -391,6 +444,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         models = models.map { if (it.name == p.name) p else it }
         store.saveModels(ModelsFile(models))
         if (p.name == modelName && !busy) {
+            loop.engine.close()
             loop.engine = Engines.create(p, paths, c.http)
             context = loop.contextInfo()
             refreshStatus()
@@ -469,6 +523,40 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             delay(3500)
             if (toast == message) toast = null
         }
+    }
+
+    // ---- model downloads (Settings, Models) ----
+
+    fun isDownloaded(m: CatalogModel) = downloader.isDownloaded(m)
+
+    fun download(m: CatalogModel) {
+        val name = m.profile.name
+        if (downloadJobs[name]?.isActive == true) return
+        val free = health?.freeStorageBytes ?: monitor.read().freeStorageBytes
+        val partial = java.io.File(downloader.target(m).path + ".part").let { if (it.exists()) it.length() else 0L }
+        if (free in 1 until (m.bytes - partial + 500_000_000)) {
+            showToast(String.format("Not enough storage: %.1f GB needed, %.1f GB free.", (m.bytes - partial) / 1e9, free / 1e9))
+            return
+        }
+        downloads[name] = if (m.bytes > 0) partial.toFloat() / m.bytes else 0f
+        downloadJobs[name] = viewModelScope.launch {
+            try {
+                downloader.download(m) { done, total -> downloads[name] = if (total > 0) done.toFloat() / total else 0f }
+                downloads.remove(name)
+                showToast("${m.profile.name} downloaded.")
+                if (name == modelName) refreshStatus()
+            } catch (_: CancellationException) {
+                downloads.remove(name)
+                showToast("Download paused. Tap Download to resume.")
+            } catch (e: Exception) {
+                downloads.remove(name)
+                showToast(e.message ?: "Download failed.")
+            }
+        }
+    }
+
+    fun cancelDownload(name: String) {
+        downloadJobs[name]?.cancel()
     }
 
     override fun onCleared() {

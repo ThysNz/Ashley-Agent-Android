@@ -179,6 +179,38 @@ fun SettingsModelsScreen(vm: ChatViewModel, back: () -> Unit) {
             }
         }
 
+        Column {
+            SectionLabel("On-device models")
+            Group {
+                nz.thys.ashley.llm.ModelCatalog.all.forEachIndexed { i, m ->
+                    if (i > 0) RowDivider()
+                    val progress = vm.downloads[m.profile.name]
+                    val have = progress == null && vm.isDownloaded(m)
+                    Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(m.profile.name, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = c.text)
+                                Text(m.profile.description, fontSize = 12.sp, color = c.muted)
+                                Text(m.note, fontSize = 12.sp, color = c.faint)
+                            }
+                            when {
+                                progress != null -> SmallButton("Pause") { vm.cancelDownload(m.profile.name) }
+                                have -> Pill("on phone", c.accentBg, c.accentText)
+                                else -> SmallButton("Download", primary = true) { vm.download(m) }
+                            }
+                        }
+                        if (progress != null) {
+                            Gap(6)
+                            androidx.compose.material3.LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                            Text(String.format("%.0f%% of %.1f GB · keep the app open", progress * 100, m.bytes / 1e9), fontSize = 11.5.sp, color = c.muted)
+                        }
+                    }
+                }
+            }
+            Gap(6)
+            Text("Use Wi-Fi: Gemma is 3.7 GB, Qwen 2.7 GB. A paused download resumes where it stopped.", fontSize = 12.sp, color = c.muted)
+        }
+
         if (current != null) ModelSettings(vm, current)
 
         Column {

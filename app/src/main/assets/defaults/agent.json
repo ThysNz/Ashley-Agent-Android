@@ -2,13 +2,18 @@
   // Same keys as F:\AI-Agents\ashley\config\agent.json, plus the phone-only "tools" switches.
   "name": "Ashley",
   "persona": "ashley",
-  "defaultModel": "demo",
+  "defaultModel": "gemma4-e4b",
   "maxToolRounds": 80,
   "historyTurns": 12,
   "commandTimeoutSeconds": 120,
   "maxNotesChars": 8000,
   "gitName": "Ashley",
   "gitEmail": "ashley@ai-agents.local",
+  // Phone comes first: on-device models won't start, and stop between steps, when the phone is
+  // hotter than maxPhoneTempC (battery temperature) or at stopThermalStatus (Android: 2 moderate, 3 severe, 4 critical).
+  "maxPhoneTempC": 42,
+  "stopThermalStatus": 3,
+  "reserveRamGb": 0.8,
   "tools": {
     "files": true,
     "web": true,

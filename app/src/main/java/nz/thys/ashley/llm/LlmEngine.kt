@@ -40,6 +40,15 @@ interface LlmEngine {
     /** Why it isn't reachable, in words for the user. */
     fun notReadyReason(): String = profile.launch ?: "Not available."
 
+    /** True when the model runs on the phone itself (the phone-health guard only applies to these). */
+    val isLocal: Boolean get() = false
+
+    /** True once the model is in memory (on-device engines load on the first message). */
+    val isLoaded: Boolean get() = true
+
+    /** Bytes the model file needs in RAM, for the free-memory check before loading. */
+    fun modelBytes(): Long = 0
+
     fun close() {}
 }
 
