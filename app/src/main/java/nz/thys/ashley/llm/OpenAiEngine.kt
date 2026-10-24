@@ -134,6 +134,8 @@ class OpenAiEngine(override val profile: ModelProfile, http: OkHttpClient) : Llm
                     }
                 })
             }
+            m.role == "user" && m.images.isNotEmpty() ->
+                put("content", m.content + "\n\n[A photo is attached, but this model is text-only and can't see it. Say so briefly; don't try to open the file.]")
             else -> put("content", m.content)
         }
     }

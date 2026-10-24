@@ -122,6 +122,8 @@ object FileTools {
         val f = sb.resolve(path)
         if (!f.exists()) return "Error: '$path' does not exist."
         if (f.isDirectory) return "Error: '$path' is a folder. Use list_files."
+        if (nz.thys.ashley.device.Photos.isImage(f.name)) return "Error: '$path' is a photo (${size(f.length())}). read_file can't show images. " +
+            "If the user attached it to their message and your model can see images, you already have it; otherwise tell them you can't see photos with this model."
         if (f.length() > 20_000_000) return "Error: '$path' is ${size(f.length())}, too big to read."
         val text = f.readText()
         if (text.contains('\u0000')) return "Error: '$path' looks like a binary file (${size(f.length())})."

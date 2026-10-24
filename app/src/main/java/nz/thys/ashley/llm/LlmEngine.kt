@@ -49,6 +49,12 @@ interface LlmEngine {
     /** Bytes the model file needs in RAM, for the free-memory check before loading. */
     fun modelBytes(): Long = 0
 
+    /** True when photos attached to a message actually reach the model. */
+    val canSeeImages: Boolean get() = false
+
+    /** Why photos don't reach this model, in words for the user. */
+    val imageProblem: String get() = "${profile.name} is a text-only model"
+
     fun close() {}
 }
 

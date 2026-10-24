@@ -298,6 +298,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val n = (items.firstOrNull { it.key == key } as? ChatItem.Assistant)?.tools?.size ?: 0
                     if (n > 0) add("$n tool call${if (n == 1) "" else "s"}")
                     e.tokensPerSecond?.let { add(String.format("%.0f tk/s", it)) }
+                    if (photoTurn != null && !loop.engine.canSeeImages) add("photo not seen: ${loop.engine.imageProblem}")
                 }.joinToString(" · ")
                 val spoken = e.spoken.ifEmpty { Speakable.make(e.text) }
                 update(key) { it.copy(status = null, text = e.text, meta = meta, spoken = spoken) }

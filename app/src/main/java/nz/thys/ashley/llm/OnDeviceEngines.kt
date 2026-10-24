@@ -80,6 +80,15 @@ class LiteRtEngine(override val profile: ModelProfile, private val paths: Paths)
 
     /** True when the loaded model accepts photos. */
     private var canSee = false
+    private var visionError: String? = null
+
+    override val canSeeImages: Boolean get() = canSee
+    override val imageProblem: String
+        get() = when {
+            engine == null -> "the model isn't loaded yet"
+            visionError != null -> "the model loaded without image support ($visionError)"
+            else -> "the model loaded without image support"
+        }
 
     override val isLocal: Boolean get() = true
     override val isLoaded: Boolean get() = engine != null
@@ -105,9 +114,11 @@ class LiteRtEngine(override val profile: ModelProfile, private val paths: Paths)
             maxNumTokens = profile.contextSize,
         )
         val e = try {
-            Engine(config(vision = true)).also { it.initialize(); canSee = true } // up to ~10 s the first time
-        } catch (ex: Exception) {
+            Engine(config(vision = true)).also { it.initialize(); canSee = true; visionError = null } // up to ~10 s the first time
+        } catch (ex: Throwable) {
+            android.util.Log.w("Ashley", "LiteRT-LM: image support failed, loading text-only", ex)
             canSee = false
+            visionError = ex.message ?: ex.javaClass.simpleName
             Engine(config(vision = false)).also { it.initialize() }
         }
         engine = e
@@ -163,10 +174,16 @@ class LiteRtEngine(override val profile: ModelProfile, private val paths: Paths)
     /** Sends the current turn: a user message with a photo goes as image + text, everything else as text. */
     private suspend fun sendTurn(conv: Conversation, msgs: List<Msg>): Message {
         val single = msgs.singleOrNull()
-        if (single != null && single.role == "user" && single.images.isNotEmpty() && canSee) {
-            val parts = single.images.map { File(paths.workspace, it) }.filter { it.isFile }
-                .map<File, Content> { Content.ImageFile(it.absolutePath) } + Content.Text(single.content)
-            return conv.sendMessage(Contents.of(parts))
+        if (single != null && single.role == "user" && single.images.isNotEmpty()) {
+            val files = single.images.map { File(paths.workspace, it) }.filter { it.isFile }
+            if (canSee && files.isNotEmpty()) {
+                android.util.Log.i("Ashley", "LiteRT-LM: sending ${files.size} photo(s): ${files.joinToString { it.name + " " + it.length() + " B" }}")
+                val parts = files.map<File, Content> { Content.ImageFile(it.absolutePath) } + Content.Text(single.content)
+                return conv.sendMessage(Contents.of(parts))
+            }
+            // Tell the model plainly, so it doesn't go looking for the file with its tools.
+            val why = if (files.isEmpty()) "the photo file is missing" else imageProblem
+            return conv.sendMessage(single.content + "\n\n[The user attached a photo, but it could not be shown to you: $why. Say so in one sentence; don't search for the file.]")
         }
         return conv.sendMessage(asText(msgs))
     }
