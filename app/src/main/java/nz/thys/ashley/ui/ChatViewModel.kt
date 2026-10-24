@@ -191,6 +191,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             while (!tts.ready && tries++ < 20) delay(250)
             voices = tts.voices()
         }
+        recoverPendingCapture()
         viewModelScope.launch {
             // Phone strip: every 3 s (every 2 s while a model is working). While an on-device model works,
             // stop it if the phone gets too hot - the phone comes first.
@@ -549,7 +550,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var pendingPhoto by mutableStateOf<String?>(null)
         private set
     private var photoTurn: Pair<String, String>? = null
-    private var photoInProgress: java.io.File? = null
+    /**
+     * The file the camera app is writing to. Kept in SharedPreferences too: while the camera is open, Android
+     * often kills Ashley to free memory (Gemma uses several GB), and the app comes back as a fresh process
+     * that would otherwise have forgotten which photo it was waiting for.
+     */
+    private val prefs by lazy { app.getSharedPreferences("ashley", android.content.Context.MODE_PRIVATE) }
+    private var photoInProgress: java.io.File?
+        get() = prefs.getString("capturePath", null)?.let { java.io.File(it) }
+        set(v) { prefs.edit().apply { if (v == null) remove("capturePath") else putString("capturePath", v.path) }.commit() }
 
     /** A new file in workspace/photos and a content:// address the camera app can write to. */
     fun newPhotoUri(): android.net.Uri {
@@ -561,16 +570,29 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         return androidx.core.content.FileProvider.getUriForFile(app, app.packageName + ".files", file)
     }
 
-    /** Called when the camera app returns. Shrinks the photo (max 1600 px, upright) so it is quick for the model. */
+    /**
+     * Called when the camera app returns. Some camera apps report "cancelled" even after saving, so the file
+     * itself decides: if it has a picture in it, it's used. Shrinks it (max 1600 px, upright) for the model.
+     */
     fun onPhotoTaken(ok: Boolean) {
         val file = photoInProgress ?: return
         photoInProgress = null
-        if (!ok || !file.exists() || file.length() == 0L) { file.delete(); return }
+        if (!file.exists() || file.length() == 0L) {
+            file.delete()
+            if (ok) showToast("The camera didn't save a photo. Try again.")
+            return
+        }
         viewModelScope.launch {
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { runCatching { Photos.shrink(file, 1600) } }
             pendingPhoto = sandbox.rel(file)
             refreshPanels()
         }
+    }
+
+    /** After a restart: a photo the camera finished while Ashley was closed is picked up here. */
+    private fun recoverPendingCapture() {
+        val file = photoInProgress ?: return
+        if (file.exists() && file.length() > 0L) onPhotoTaken(true) else if (!file.exists()) photoInProgress = null
     }
 
     fun clearPhoto() { pendingPhoto = null }
