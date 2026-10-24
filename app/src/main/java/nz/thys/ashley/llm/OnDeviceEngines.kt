@@ -143,13 +143,17 @@ class LiteRtEngine(override val profile: ModelProfile, private val paths: Paths)
         val calls = reply.toolCalls.map { tc ->
             ToolCall("call_" + UUID.randomUUID().toString().take(8), tc.name, argsToJson(tc.arguments))
         }
-        val text = (reply.text ?: "").replace(Regex("<think>.*?</think>", RegexOption.DOT_MATCHES_ALL), "")
+        val text = textOf(reply).replace(Regex("<think>.*?</think>", RegexOption.DOT_MATCHES_ALL), "")
         // Remember exactly what AgentLoop will add, so the next round only sends what is new.
         sent = messages + if (calls.isEmpty()) Msg("assistant", text.trim().ifEmpty { "(no reply)" }) else Msg("assistant", text, toolCalls = calls)
 
         val ms = System.currentTimeMillis() - started
         LlmResult(text, calls, promptTokens = null, completionTokens = (text.length / 4).coerceAtLeast(1), ms = ms)
     }
+
+    /** The text parts of a reply (a Message holds a list of Content items: text, images, tool calls...). */
+    private fun textOf(m: Message): String =
+        m.contents.contents.filterIsInstance<Content.Text>().joinToString("") { it.text }
 
     /** Earlier turns as plain user / model messages (tool rounds folded into the model's text). */
     private fun history(msgs: List<Msg>): List<Message> {
