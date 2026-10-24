@@ -38,6 +38,8 @@ import androidx.compose.material.icons.automirrored.outlined.VolumeUp
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.automirrored.outlined.List as ListIcon
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Mic
@@ -262,7 +264,7 @@ private fun ChatLog(vm: ChatViewModel) {
     LazyColumn(state = state, modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         items(vm.items, key = { it.key }) { item ->
             when (item) {
-                is ChatItem.User -> UserBubble(item)
+                is ChatItem.User -> Column { UserBubble(vm, item) }
                 is ChatItem.Assistant -> AssistantBlock(vm, item)
             }
         }
@@ -270,8 +272,15 @@ private fun ChatLog(vm: ChatViewModel) {
 }
 
 @Composable
-private fun UserBubble(item: ChatItem.User) {
+private fun UserBubble(vm: ChatViewModel, item: ChatItem.User) {
     val c = Ashley.colors
+    var viewing by remember { mutableStateOf(false) }
+    item.photo?.let { rel ->
+        Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), horizontalArrangement = Arrangement.End) {
+            PhotoInChat(vm.workspaceFile(rel)) { viewing = true }
+        }
+        if (viewing) PhotoViewer(vm.workspaceFile(rel), item.text) { viewing = false }
+    }
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
         if (item.spoken) Icon(Icons.Outlined.Mic, "Spoken", tint = c.muted, modifier = Modifier.size(15.dp).padding(end = 2.dp))
         Text(
@@ -362,6 +371,24 @@ private fun Composer(vm: ChatViewModel) {
     var hasMic by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
     }
+    val takePhoto = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok -> vm.onPhotoTaken(ok) }
+
+    // A photo waiting for its comment.
+    vm.pendingPhoto?.let { rel ->
+        Row(
+            Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 6.dp).clip(RoundedCornerShape(12.dp))
+                .background(c.surface).border(1.dp, c.border, RoundedCornerShape(12.dp)).padding(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            PhotoThumb(vm.workspaceFile(rel), 56)
+            Column(Modifier.weight(1f).padding(horizontal = 10.dp)) {
+                Text("Photo ready", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = c.text)
+                Text("Type or say your comment, then send. Saved in ${rel.substringBeforeLast('/')}/", fontSize = 12.sp, color = c.muted)
+            }
+            SmallIcon(Icons.Outlined.Close, "Remove photo") { vm.clearPhoto() }
+        }
+    }
+
     val askMic = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
         hasMic = ok
         if (!ok) vm.micPermissionDenied()
@@ -402,6 +429,12 @@ private fun Composer(vm: ChatViewModel) {
             contentAlignment = Alignment.Center,
         ) { Icon(Icons.Outlined.Mic, null, tint = micFg, modifier = Modifier.size(22.dp)) }
 
+        Box(
+            Modifier.size(width = 40.dp, height = 48.dp).clip(RoundedCornerShape(12.dp))
+                .clickable(role = Role.Button, onClickLabel = "Take a photo") { runCatching { takePhoto.launch(vm.newPhotoUri()) }.onFailure { vm.showToast("No camera app found.") } },
+            contentAlignment = Alignment.Center,
+        ) { Icon(Icons.Outlined.PhotoCamera, "Take a photo", tint = c.text, modifier = Modifier.size(22.dp)) }
+
         Box(Modifier.weight(1f)) {
             BasicTextField(
                 value = vm.input,
@@ -433,7 +466,7 @@ private fun Composer(vm: ChatViewModel) {
             }
         }
 
-        val canSend = vm.input.isNotBlank()
+        val canSend = vm.input.isNotBlank() || vm.pendingPhoto != null
         Box(
             Modifier.size(48.dp).clip(CircleShape)
                 .background(if (vm.busy) c.danger else if (canSend) c.accent else c.accent.copy(alpha = 0.5f))

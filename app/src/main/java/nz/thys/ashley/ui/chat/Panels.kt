@@ -177,7 +177,8 @@ fun PanelDrawer(vm: ChatViewModel, visible: Boolean, onClose: () -> Unit) {
                                     .clickable { if (f.isDir) vm.openDir(f.rel) else viewing = f.rel }.padding(horizontal = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Icon(if (f.isDir) Icons.Outlined.Folder else Icons.Outlined.Description, null, tint = if (f.isDir) c.accent else c.muted, modifier = Modifier.size(16.dp))
+                                if (!f.isDir && nz.thys.ashley.device.Photos.isImage(f.name)) PhotoThumb(vm.workspaceFile(f.rel), 28)
+                                else Icon(if (f.isDir) Icons.Outlined.Folder else Icons.Outlined.Description, null, tint = if (f.isDir) c.accent else c.muted, modifier = Modifier.size(16.dp))
                                 Text(f.name, fontSize = 14.sp, color = c.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 10.dp))
                             }
                         }
@@ -187,6 +188,10 @@ fun PanelDrawer(vm: ChatViewModel, visible: Boolean, onClose: () -> Unit) {
         }
     }
     viewing?.let { rel ->
+        if (nz.thys.ashley.device.Photos.isImage(rel)) {
+            PhotoViewer(vm.workspaceFile(rel), null) { viewing = null }
+            return@let
+        }
         AlertDialog(
             onDismissRequest = { viewing = null },
             title = { Text(rel.substringAfterLast('/'), maxLines = 1, overflow = TextOverflow.Ellipsis) },

@@ -38,6 +38,9 @@ class FakeEngine(override val profile: ModelProfile) : LlmEngine {
             return result(reply, prompt)
         }
 
+        if (last?.role == "user" && last.images.isNotEmpty()) {
+            return result("I've saved your photo as ${last.images.first()}. The demo engine can't see it; switch to Gemma 4 to talk about it.", prompt)
+        }
         val text = last?.content?.trim() ?: ""
         val lower = text.lowercase()
         fun call(name: String, args: String) =

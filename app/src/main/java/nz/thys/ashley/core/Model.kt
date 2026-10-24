@@ -23,6 +23,8 @@ data class Msg(
     val toolName: String? = null,
     /** True when the user message came from the microphone (the reply is spoken). */
     val spoken: Boolean = false,
+    /** Photos attached to a user message, as paths relative to the workspace (e.g. photos/IMG_20261025_104200.jpg). */
+    val images: List<String> = emptyList(),
 )
 
 /** Live progress of one turn - the same events the desktop web page gets from /chat/stream. */

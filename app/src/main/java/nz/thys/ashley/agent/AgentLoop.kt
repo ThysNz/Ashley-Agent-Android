@@ -69,9 +69,9 @@ class AgentLoop(
      * Runs one user turn. [emit] receives live events (called on the caller's thread).
      * Cancelling the coroutine stops the task; the history is kept consistent either way.
      */
-    suspend fun run(userText: String, voice: Boolean, emit: (AgentEvent) -> Unit): String {
+    suspend fun run(userText: String, voice: Boolean, images: List<String> = emptyList(), emit: (AgentEvent) -> Unit): String {
         val started = System.currentTimeMillis()
-        add(Msg("user", userText, spoken = voice))
+        add(Msg("user", userText, spoken = voice, images = images))
         var genTokens = 0
         var genMs = 0L
         try {
@@ -193,6 +193,8 @@ class AgentLoop(
         parts += "## How to work\n" +
             "- You are an agent: when asked to do something, do it with your tools instead of describing how. Keep going until the task is finished.\n" +
             "- Look before you change: list or read files first. Never guess a path or file content.\n" +
+            "- Photos $user takes in the app are saved in the workspace under photos/ (the message names the file), and photos/photo-log.md " +
+            "keeps each photo with his comment and your reply. If you can see the photo, describe what matters for his question; if you can't, say so.\n" +
             "- For jobs with three or more steps, write a todo list first and tick items off.\n" +
             "- Never claim to have done something unless a tool result confirms it. If something failed, say so plainly.\n" +
             "- Be brief. While working, call tools with no commentary or at most one short line. When finished, give ONE final reply of 1-4 short sentences: what you did and the result. " +

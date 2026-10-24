@@ -78,6 +78,9 @@ class LiteRtEngine(override val profile: ModelProfile, private val paths: Paths)
     private var conversationKey: String? = null
     private var sent: List<Msg> = emptyList()
 
+    /** True when the loaded model accepts photos. */
+    private var canSee = false
+
     override val isLocal: Boolean get() = true
     override val isLoaded: Boolean get() = engine != null
     override fun modelBytes(): Long = resolveModelFile(profile, paths)?.length() ?: 0
@@ -91,16 +94,22 @@ class LiteRtEngine(override val profile: ModelProfile, private val paths: Paths)
         engine?.let { return it }
         val file = resolveModelFile(profile, paths) ?: throw IllegalStateException(notReadyReason())
         val cache = File(paths.root, "cache").apply { mkdirs() }
-        val config = EngineConfig(
+        fun config(vision: Boolean) = EngineConfig(
             modelPath = file.absolutePath,
             // NPU needs the app's native library folder; GPU is the tested path on the S26.
             backend = if (profile.backend == "cpu") Backend.CPU() else Backend.GPU(),
+            // Photos: Gemma 4 E4B has a vision encoder. A text-only model file fails here, so we retry without it.
+            visionBackend = if (vision) Backend.GPU() else null,
             cacheDir = cache.path,
             // Context window (prompt + reply). Gemma 4 E4B supports up to 32k; contextSize in models.json.
             maxNumTokens = profile.contextSize,
         )
-        val e = Engine(config)
-        e.initialize() // up to ~10 s the first time
+        val e = try {
+            Engine(config(vision = true)).also { it.initialize(); canSee = true } // up to ~10 s the first time
+        } catch (ex: Exception) {
+            canSee = false
+            Engine(config(vision = false)).also { it.initialize() }
+        }
         engine = e
         return e
     }
@@ -120,7 +129,7 @@ class LiteRtEngine(override val profile: ModelProfile, private val paths: Paths)
             reply = if (fresh.all { it.role == "tool" }) {
                 conv.sendMessage(Message.tool(Contents.of(fresh.map { Content.ToolResponse(it.toolName ?: "tool", wrapResult(it.content)) })))
             } else {
-                conv.sendMessage(asText(fresh))
+                sendTurn(conv, fresh)
             }
         } else {
             runCatching { conversation?.close() }
@@ -137,7 +146,7 @@ class LiteRtEngine(override val profile: ModelProfile, private val paths: Paths)
             )
             conversation = conv
             conversationKey = key
-            reply = conv.sendMessage(asText(messages.drop(lastUser)))
+            reply = sendTurn(conv, messages.drop(lastUser))
         }
 
         val calls = reply.toolCalls.map { tc ->
@@ -149,6 +158,17 @@ class LiteRtEngine(override val profile: ModelProfile, private val paths: Paths)
 
         val ms = System.currentTimeMillis() - started
         LlmResult(text, calls, promptTokens = null, completionTokens = (text.length / 4).coerceAtLeast(1), ms = ms)
+    }
+
+    /** Sends the current turn: a user message with a photo goes as image + text, everything else as text. */
+    private suspend fun sendTurn(conv: Conversation, msgs: List<Msg>): Message {
+        val single = msgs.singleOrNull()
+        if (single != null && single.role == "user" && single.images.isNotEmpty() && canSee) {
+            val parts = single.images.map { File(paths.workspace, it) }.filter { it.isFile }
+                .map<File, Content> { Content.ImageFile(it.absolutePath) } + Content.Text(single.content)
+            return conv.sendMessage(Contents.of(parts))
+        }
+        return conv.sendMessage(asText(msgs))
     }
 
     /** The text parts of a reply (a Message holds a list of Content items: text, images, tool calls...). */

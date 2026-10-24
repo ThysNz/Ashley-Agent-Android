@@ -24,6 +24,7 @@ import nz.thys.ashley.core.ContextInfo
 import nz.thys.ashley.core.InspectInfo
 import nz.thys.ashley.core.Msg
 import nz.thys.ashley.device.PhoneHealth
+import nz.thys.ashley.device.Photos
 import nz.thys.ashley.device.PhoneLimits
 import nz.thys.ashley.device.PhoneMonitor
 import nz.thys.ashley.llm.CatalogModel
@@ -58,7 +59,7 @@ data class ToolUi(
 sealed interface ChatItem {
     val key: Long
 
-    data class User(override val key: Long, val text: String, val spoken: Boolean) : ChatItem
+    data class User(override val key: Long, val text: String, val spoken: Boolean, val photo: String? = null) : ChatItem
 
     data class Assistant(
         override val key: Long,
@@ -71,6 +72,9 @@ sealed interface ChatItem {
         val spoken: String = "",
     ) : ChatItem
 }
+
+/** Marks the photo path inside a user message's text: "[Photo saved as photos/IMG_....jpg]". */
+const val PHOTO_TAG = "[Photo saved as"
 
 data class FileEntry(val name: String, val rel: String, val isDir: Boolean, val size: Long)
 
@@ -223,12 +227,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     // ---- sending ----
 
     fun send(textIn: String = input, spoken: Boolean = false) {
-        val text = textIn.trim()
+        val photo = pendingPhoto
+        val text = textIn.trim().ifEmpty { if (photo != null) "What do you see in this photo?" else "" }
         if (text.isEmpty()) return
         if (busy) { showToast("Stop the running task first."); return }
         input = ""
+        pendingPhoto = null
         stopSpeaking()
-        items += ChatItem.User(key(), text, spoken)
+        items += ChatItem.User(key(), text, spoken, photo)
+        // The photo's path goes into the text too, so text-only models (the PC's 30B) still know where it is.
+        val content = if (photo != null) "$text\n\n$PHOTO_TAG $photo]" else text
+        val images = listOfNotNull(photo)
+        photoTurn = photo?.let { it to text }
         val aKey = key()
         // Phone comes first: an on-device model doesn't start when the phone is hot or short of memory.
         val engine = loop.engine
@@ -239,6 +249,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 ?: if (!engine.isLoaded) PhoneMonitor.notEnoughRam(h, engine.modelBytes(), limits()) else null
             if (refusal != null) {
                 items += ChatItem.Assistant(aKey, error = "Not started: $refusal")
+                pendingPhoto = photo
+                photoTurn = null
                 return
             }
         }
@@ -246,7 +258,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         busy = true
         job = viewModelScope.launch {
             try {
-                loop.run(text, spoken) { e -> onEvent(aKey, e) }
+                loop.run(content, spoken, images) { e -> onEvent(aKey, e) }
             } catch (_: CancellationException) {
                 // AgentLoop already emitted Stopped
             } finally {
@@ -290,6 +302,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val spoken = e.spoken.ifEmpty { Speakable.make(e.text) }
                 update(key) { it.copy(status = null, text = e.text, meta = meta, spoken = spoken) }
                 if (voiceConfig.speakReplies) speak(key, spoken)
+                photoTurn?.let { (photo, comment) -> logPhoto(photo, comment, e.text) }
+                photoTurn = null
             }
             is AgentEvent.Error -> update(key) { it.copy(status = null, error = e.error) }
             AgentEvent.Stopped -> update(key) { it.copy(status = null, meta = "Stopped") }
@@ -302,7 +316,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         var current: ChatItem.Assistant? = null
         fun flush() { current?.let { items += it }; current = null }
         for (m in history) when (m.role) {
-            "user" -> { flush(); items += ChatItem.User(key(), m.content, m.spoken) }
+            "user" -> { flush(); items += ChatItem.User(key(), m.content.substringBefore(PHOTO_TAG).trim(), m.spoken, m.images.firstOrNull()) }
             "assistant" -> {
                 val a = current ?: ChatItem.Assistant(key())
                 current = if (m.toolCalls.isNotEmpty()) {
@@ -522,6 +536,50 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             delay(3500)
             if (toast == message) toast = null
+        }
+    }
+
+    // ---- photos (camera button in the composer) ----
+
+    /** The photo waiting to go with the next message (workspace-relative path). */
+    var pendingPhoto by mutableStateOf<String?>(null)
+        private set
+    private var photoTurn: Pair<String, String>? = null
+    private var photoInProgress: java.io.File? = null
+
+    /** A new file in workspace/photos and a content:// address the camera app can write to. */
+    fun newPhotoUri(): android.net.Uri {
+        val dir = java.io.File(paths.workspace, "photos").apply { mkdirs() }
+        val name = "IMG_" + java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")) + ".jpg"
+        val file = java.io.File(dir, name)
+        photoInProgress = file
+        val app = getApplication<android.app.Application>()
+        return androidx.core.content.FileProvider.getUriForFile(app, app.packageName + ".files", file)
+    }
+
+    /** Called when the camera app returns. Shrinks the photo (max 1600 px, upright) so it is quick for the model. */
+    fun onPhotoTaken(ok: Boolean) {
+        val file = photoInProgress ?: return
+        photoInProgress = null
+        if (!ok || !file.exists() || file.length() == 0L) { file.delete(); return }
+        viewModelScope.launch {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { runCatching { Photos.shrink(file, 1600) } }
+            pendingPhoto = sandbox.rel(file)
+            refreshPanels()
+        }
+    }
+
+    fun clearPhoto() { pendingPhoto = null }
+
+    fun workspaceFile(rel: String): java.io.File = java.io.File(paths.workspace, rel)
+
+    /** photos/photo-log.md: each photo with the comment and Ashley's reply, to review later. */
+    private fun logPhoto(photo: String, comment: String, reply: String) {
+        runCatching {
+            val log = java.io.File(paths.workspace, "photos/photo-log.md")
+            if (!log.exists()) log.writeText("# Photo log\n\nPhotos taken in Ashley, with your comment and her reply.\n")
+            val time = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+            log.appendText("\n## $time - ${photo.substringAfterLast('/')}\n\n![photo](${photo.substringAfterLast('/')})\n\n**Comment:** $comment\n\n**Ashley (${modelName}):** ${reply.trim()}\n")
         }
     }
 
