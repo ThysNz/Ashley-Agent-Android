@@ -166,6 +166,21 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val workspacePath: String get() = paths.workspace.absolutePath
     val modelsPath: String get() = paths.models.absolutePath
 
+    // Photo state is declared before init: init recovers a capture, and Kotlin initialises properties in order.
+    /** The photo waiting to go with the next message (workspace-relative path). */
+    var pendingPhoto by mutableStateOf<String?>(null)
+        private set
+    private var photoTurn: Pair<String, String>? = null
+    /**
+     * The file the camera app is writing to. Kept in SharedPreferences too: while the camera is open, Android
+     * often kills Ashley to free memory (Gemma uses several GB), and the app comes back as a fresh process
+     * that would otherwise have forgotten which photo it was waiting for.
+     */
+    private val prefs by lazy { app.getSharedPreferences("ashley", android.content.Context.MODE_PRIVATE) }
+    private var photoInProgress: java.io.File?
+        get() = prefs.getString("capturePath", null)?.let { java.io.File(it) }
+        set(v) { prefs.edit().apply { if (v == null) remove("capturePath") else putString("capturePath", v.path) }.commit() }
+
     init {
         // Add Gemma 4 / Qwen3.5 to an older models.json without touching the user's own entries.
         val merged = ModelCatalog.merge(models)
@@ -568,19 +583,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- photos (camera button in the composer) ----
 
-    /** The photo waiting to go with the next message (workspace-relative path). */
-    var pendingPhoto by mutableStateOf<String?>(null)
-        private set
-    private var photoTurn: Pair<String, String>? = null
-    /**
-     * The file the camera app is writing to. Kept in SharedPreferences too: while the camera is open, Android
-     * often kills Ashley to free memory (Gemma uses several GB), and the app comes back as a fresh process
-     * that would otherwise have forgotten which photo it was waiting for.
-     */
-    private val prefs by lazy { app.getSharedPreferences("ashley", android.content.Context.MODE_PRIVATE) }
-    private var photoInProgress: java.io.File?
-        get() = prefs.getString("capturePath", null)?.let { java.io.File(it) }
-        set(v) { prefs.edit().apply { if (v == null) remove("capturePath") else putString("capturePath", v.path) }.commit() }
 
     /** A new file in workspace/photos and a content:// address the camera app can write to. */
     fun newPhotoUri(): android.net.Uri {
