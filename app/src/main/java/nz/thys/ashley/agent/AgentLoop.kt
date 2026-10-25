@@ -71,6 +71,10 @@ class AgentLoop(
      * Runs one user turn. [emit] receives live events (called on the caller's thread).
      * Cancelling the coroutine stops the task; the history is kept consistent either way.
      */
+    /** Words that mean the user wants something done with the photo (logged, saved, added...), so tools stay on. */
+    private fun wantsAction(text: String): Boolean =
+        Regex("\\b(log|note|notes|save|write|file|remember|todo|to-do|add|record|keep|store|list|remind)\\b", RegexOption.IGNORE_CASE).containsMatchIn(text)
+
     suspend fun run(userText: String, voice: Boolean, images: List<String> = emptyList(), emit: (AgentEvent) -> Unit): String {
         val started = System.currentTimeMillis()
         add(Msg("user", userText, spoken = voice, images = images))
@@ -81,6 +85,9 @@ class AgentLoop(
             // and stop exact repeats: a call already made this turn gets its old result plus a nudge to answer.
             val maxRounds = if (engine.isLocal) minOf(config.maxToolRounds, LOCAL_MAX_ROUNDS) else config.maxToolRounds
             val doneThisTurn = mutableMapOf<String, String>()
+            // A photo the model can see, with a plain question ("what is this"): answer from the picture, no tools.
+            // Small models otherwise go looking for the file with list_files/read_file, which can't show images.
+            val lookOnly = images.isNotEmpty() && engine.canSeeImages && !wantsAction(userText.substringBefore("[Photo saved as"))
             for (round in 1..maxRounds) {
                 guard?.invoke()?.let { reason ->
                     repairHistory()
@@ -91,7 +98,7 @@ class AgentLoop(
                 }
                 emit(AgentEvent.Thinking(round))
                 val system = buildSystemPrompt(voice)
-                val active = if (engine.profile.supportsTools) tools else emptyList()
+                val active = if (engine.profile.supportsTools && !(lookOnly && round == 1)) tools else emptyList()
                 val toSend = trimmed(system, active)
                 val result = engine.chat(system, toSend, active)
                 coroutineContext.ensureActive()

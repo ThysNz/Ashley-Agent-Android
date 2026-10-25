@@ -188,7 +188,13 @@ class LiteRtEngine(override val profile: ModelProfile, private val paths: Paths)
             val files = single.images.map { File(paths.workspace, it) }.filter { it.isFile }
             if (canSee && files.isNotEmpty()) {
                 android.util.Log.i("Ashley", "LiteRT-LM: sending ${files.size} photo(s): ${files.joinToString { it.name + " " + it.length() + " B" }}")
-                val parts = files.map<File, Content> { Content.ImageFile(it.absolutePath) } + Content.Text(single.content)
+                // The photo is in this message: say so plainly, instead of the "[Photo saved as …]" file note that
+                // makes small models go and look for the file with their tools.
+                val comment = single.content.substringBefore("[Photo saved as").trim().ifEmpty { "What is in this photo?" }
+                val saved = single.images.joinToString()
+                val text = "$comment\n\n(The photo above is attached to this message and you can see it. Answer from what you see. " +
+                    "Never open it with read_file or list_files. It is saved as $saved if a tool needs the name.)"
+                val parts = files.map<File, Content> { Content.ImageFile(it.absolutePath) } + Content.Text(text)
                 return conv.sendMessage(Contents.of(parts))
             }
             // Tell the model plainly, so it doesn't go looking for the file with its tools.
