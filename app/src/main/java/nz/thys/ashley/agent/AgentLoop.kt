@@ -87,7 +87,10 @@ class AgentLoop(
             val doneThisTurn = mutableMapOf<String, String>()
             // A photo the model can see, with a plain question ("what is this"): answer from the picture, no tools.
             // Small models otherwise go looking for the file with list_files/read_file, which can't show images.
-            val lookOnly = images.isNotEmpty() && engine.canSeeImages && !wantsAction(userText.substringBefore("[Photo saved as"))
+            // (An on-device model loads on its first message, so "can it see?" is only known after loading: assume yes.
+            // If it turns out it can't, the engine tells it so, and with no tools it just says it couldn't see the photo.)
+            val lookOnly = images.isNotEmpty() && (engine.canSeeImages || !engine.isLoaded) &&
+                !wantsAction(userText.substringBefore("[Photo saved as"))
             for (round in 1..maxRounds) {
                 guard?.invoke()?.let { reason ->
                     repairHistory()
