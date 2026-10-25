@@ -339,40 +339,61 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- voice ----
 
+    /** What Ashley last said out loud, so the mic can tell her own voice from Thys's. */
+    private var lastSpoken = ""
+    private var sttStarted = false
+
     fun micDown() {
-        stopSpeaking()
         if (recording) return
+        // Stop her talking first; if she was, give the speaker a moment to go quiet so the mic doesn't hear her.
+        val wasSpeaking = tts.speaking
+        stopSpeaking()
         recording = true
+        sttStarted = false
         partial = ""
         level = 0f
-        recordStart = System.currentTimeMillis()
-        stt.start(voiceConfig.stt.language, object : SttEngine.Listener {
-            override fun onLevel(level: Float) { this@ChatViewModel.level = level }
-            override fun onPartial(text: String) { partial = text }
-            override fun onResult(text: String) {
-                recording = false
-                val fixed = applyCorrections(text, voiceConfig.stt.corrections).trim()
-                when {
-                    fixed.isEmpty() -> showToast("Didn't catch that.")
-                    voiceConfig.autoSend && !busy -> send(fixed, spoken = true)
-                    else -> input = if (input.isBlank()) fixed else "$input $fixed"
-                }
-            }
-            override fun onError(message: String) {
-                recording = false
-                showToast(message)
-            }
-        })
-        // Safety net: max recording length from voice.json.
+        val started = System.currentTimeMillis()
+        recordStart = started
         viewModelScope.launch {
-            val started = recordStart
+            if (wasSpeaking) delay(350)
+            if (!recording || recordStart != started) return@launch   // let go before the mic opened
+            sttStarted = true
+            stt.start(voiceConfig.stt.language, object : SttEngine.Listener {
+                override fun onLevel(level: Float) { this@ChatViewModel.level = level }
+                override fun onPartial(text: String) { partial = text }
+                override fun onResult(text: String) {
+                    recording = false
+                    val fixed = applyCorrections(text, voiceConfig.stt.corrections).trim()
+                    when {
+                        fixed.isEmpty() -> showToast("Didn't catch that.")
+                        isEcho(fixed) -> showToast("That was Ashley's own voice, so it was ignored. Hold the mic after she stops.")
+                        voiceConfig.autoSend && !busy -> send(fixed, spoken = true)
+                        else -> input = if (input.isBlank()) fixed else "$input $fixed"
+                    }
+                }
+                override fun onError(message: String) {
+                    recording = false
+                    showToast(message)
+                }
+            })
+            // Safety net: max recording length from voice.json.
             delay(voiceConfig.stt.maxSeconds * 1000L)
             if (recording && recordStart == started) micUp()
         }
     }
 
+    /** True when the recognised words are mostly a piece of what Ashley just said (the mic picked up the speaker). */
+    private fun isEcho(heard: String): Boolean {
+        fun words(t: String) = t.lowercase().split(Regex("[^a-z0-9']+")).filter { it.isNotBlank() }
+        val h = words(heard)
+        if (h.size < 4 || lastSpoken.isBlank()) return false
+        val said = words(lastSpoken).toSet()
+        return h.count { it in said } >= h.size * 0.8
+    }
+
     fun micUp() {
-        if (recording) stt.stop()
+        if (!recording) return
+        if (sttStarted) stt.stop() else recording = false
     }
 
     fun micCancel() {
@@ -383,12 +404,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun speak(key: Long?, text: String) {
         if (text.isBlank()) return
         speakingKey = key ?: -1
+        lastSpoken = text
         val v = voiceConfig.tts
         tts.speak(text, voiceName, v.speed, v.pitch) { speakingKey = null }
     }
 
     fun stopSpeaking() {
-        if (speakingKey != null) tts.stop()
+        tts.stop()   // always: the "speaking" flag can be cleared while the phone is still talking
         speakingKey = null
     }
 

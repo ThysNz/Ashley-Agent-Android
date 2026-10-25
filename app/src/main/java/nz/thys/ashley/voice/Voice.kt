@@ -31,6 +31,8 @@ interface SttEngine {
 /** Text-to-speech. Phase 1: Android's TTS (Samsung or Google engine). Phase 4: sherpa-onnx with the Piper voices. */
 interface TtsEngine {
     val ready: Boolean
+    /** True while the phone is actually playing speech (not just while Ashley thinks it is). */
+    val speaking: Boolean
     fun voices(): List<String>
     fun speak(text: String, voice: String, speed: Float, pitch: Float, onDone: () -> Unit)
     fun stop()
@@ -180,19 +182,26 @@ class AndroidTts(context: Context) : TtsEngine {
     private var isReady = false
     override val ready: Boolean get() = isReady
     private var onDone: (() -> Unit)? = null
+    /** The utterance now playing. Callbacks for older ones (e.g. the onStop that QUEUE_FLUSH sends) are ignored. */
+    @Volatile
+    private var currentId: String? = null
     private val tts: TextToSpeech = TextToSpeech(context.applicationContext) { status -> isReady = status == TextToSpeech.SUCCESS }
+
+    override val speaking: Boolean get() = currentId != null || runCatching { tts.isSpeaking }.getOrDefault(false)
 
     init {
         tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {}
-            override fun onDone(utteranceId: String?) { finish() }
+            override fun onDone(utteranceId: String?) { finish(utteranceId) }
             @Deprecated("Deprecated in Java")
-            override fun onError(utteranceId: String?) { finish() }
-            override fun onStop(utteranceId: String?, interrupted: Boolean) { finish() }
+            override fun onError(utteranceId: String?) { finish(utteranceId) }
+            override fun onStop(utteranceId: String?, interrupted: Boolean) { finish(utteranceId) }
         })
     }
 
-    private fun finish() {
+    private fun finish(utteranceId: String?) {
+        if (utteranceId != null && utteranceId != currentId) return
+        currentId = null
         val cb = onDone
         onDone = null
         cb?.invoke()
@@ -206,17 +215,20 @@ class AndroidTts(context: Context) : TtsEngine {
 
     override fun speak(text: String, voice: String, speed: Float, pitch: Float, onDone: () -> Unit) {
         if (!ready || text.isBlank()) { onDone(); return }
+        currentId = null
         tts.stop()
+        val id = "ashley-" + System.currentTimeMillis()
+        currentId = id
         this.onDone = onDone
         if (voice.isNotBlank()) tts.voices?.firstOrNull { it.name == voice }?.let { tts.voice = it }
         tts.setSpeechRate(speed)
         tts.setPitch(pitch)
-        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "ashley-" + System.currentTimeMillis())
+        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
     }
 
     override fun stop() {
         tts.stop()
-        finish()
+        finish(null)
     }
 
     override fun release() {
